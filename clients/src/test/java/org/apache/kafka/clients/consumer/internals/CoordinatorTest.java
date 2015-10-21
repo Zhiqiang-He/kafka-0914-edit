@@ -21,8 +21,11 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import org.apache.kafka.clients.ClientRequest;
 import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.MockClient;
+import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.clients.consumer.OffsetResetStrategy;
 import org.apache.kafka.common.Cluster;
@@ -30,12 +33,14 @@ import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.ApiException;
 import org.apache.kafka.common.errors.DisconnectException;
+import org.apache.kafka.common.errors.OffsetMetadataTooLarge;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.protocol.types.Struct;
 import org.apache.kafka.common.requests.ConsumerMetadataResponse;
 import org.apache.kafka.common.requests.HeartbeatResponse;
 import org.apache.kafka.common.requests.JoinGroupResponse;
+import org.apache.kafka.common.requests.OffsetCommitRequest;
 import org.apache.kafka.common.requests.OffsetCommitResponse;
 import org.apache.kafka.common.requests.OffsetFetchResponse;
 import org.apache.kafka.common.utils.MockTime;
@@ -49,6 +54,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -62,6 +68,8 @@ public class CoordinatorTest {
     private int heartbeatIntervalMs = 2;
     private long retryBackoffMs = 100;
     private long requestTimeoutMs = 5000;
+    private boolean autoCommitEnabled = false;
+    private long autoCommitIntervalMs = 5000;
     private String rebalanceStrategy = "not-matter";
     private MockTime time;
     private MockClient client;
@@ -72,7 +80,7 @@ public class CoordinatorTest {
     private Metrics metrics;
     private Map<String, String> metricTags = new LinkedHashMap<String, String>();
     private ConsumerNetworkClient consumerClient;
-    private MockSubscriptionListener subscriptionListener;
+    private MockRebalanceListener subscriptionListener;
     private MockCommitCallback defaultOffsetCommitCallback;
     private Coordinator coordinator;
 
@@ -84,7 +92,7 @@ public class CoordinatorTest {
         this.metadata = new Metadata(0, Long.MAX_VALUE);
         this.consumerClient = new ConsumerNetworkClient(client, metadata, time, 100);
         this.metrics = new Metrics(time);
-        this.subscriptionListener = new MockSubscriptionListener();
+        this.subscriptionListener = new MockRebalanceListener();
         this.defaultOffsetCommitCallback = new MockCommitCallback();
 
         client.setNode(node);
@@ -101,7 +109,14 @@ public class CoordinatorTest {
                 time,
                 requestTimeoutMs,
                 retryBackoffMs,
-                defaultOffsetCommitCallback);
+                defaultOffsetCommitCallback,
+                autoCommitEnabled,
+                autoCommitIntervalMs);
+    }
+
+    @After
+    public void teardown() {
+        this.metrics.close();
     }
 
     @Test
@@ -301,16 +316,38 @@ public class CoordinatorTest {
     }
 
     @Test
-    public void testCommitOffsetNormal() {
+    public void testCommitOffsetOnly() {
+        subscriptions.assign(Arrays.asList(tp));
+
         client.prepareResponse(consumerMetadataResponse(node, Errors.NONE.code()));
         coordinator.ensureCoordinatorKnown();
 
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.NONE.code())));
 
         AtomicBoolean success = new AtomicBoolean(false);
-        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, 100L), callback(success));
+        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, new OffsetAndMetadata(100L)), callback(success));
         consumerClient.poll(0);
         assertTrue(success.get());
+
+        assertEquals(100L, subscriptions.committed(tp).offset());
+    }
+
+    @Test
+    public void testCommitOffsetMetadata() {
+        subscriptions.assign(Arrays.asList(tp));
+
+        client.prepareResponse(consumerMetadataResponse(node, Errors.NONE.code()));
+        coordinator.ensureCoordinatorKnown();
+
+        client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.NONE.code())));
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, new OffsetAndMetadata(100L, "hello")), callback(success));
+        consumerClient.poll(0);
+        assertTrue(success.get());
+
+        assertEquals(100L, subscriptions.committed(tp).offset());
+        assertEquals("hello", subscriptions.committed(tp).metadata());
     }
 
     @Test
@@ -319,10 +356,42 @@ public class CoordinatorTest {
         client.prepareResponse(consumerMetadataResponse(node, Errors.NONE.code()));
         coordinator.ensureCoordinatorKnown();
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.NONE.code())));
-        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, 100L), null);
+        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, new OffsetAndMetadata(100L)), null);
         consumerClient.poll(0);
         assertEquals(invokedBeforeTest + 1, defaultOffsetCommitCallback.invoked);
         assertNull(defaultOffsetCommitCallback.exception);
+    }
+
+    @Test
+    public void testResetGeneration() {
+        // enable auto-assignment
+        subscriptions.subscribe(Arrays.asList(topicName), subscriptionListener);
+
+        client.prepareResponse(consumerMetadataResponse(node, Errors.NONE.code()));
+        coordinator.ensureCoordinatorKnown();
+
+        client.prepareResponse(joinGroupResponse(1, "consumer", Collections.singletonList(tp), Errors.NONE.code()));
+        coordinator.ensurePartitionAssignment();
+
+        // now switch to manual assignment
+        subscriptions.unsubscribe();
+        coordinator.resetGeneration();
+        subscriptions.assign(Arrays.asList(tp));
+
+        // the client should not reuse generation/consumerId from auto-subscribed generation
+        client.prepareResponse(new MockClient.RequestMatcher() {
+            @Override
+            public boolean matches(ClientRequest request) {
+                OffsetCommitRequest commitRequest = new OffsetCommitRequest(request.request().body());
+                return commitRequest.consumerId().equals(OffsetCommitRequest.DEFAULT_CONSUMER_ID) &&
+                        commitRequest.generationId() == OffsetCommitRequest.DEFAULT_GENERATION_ID;
+            }
+        }, offsetCommitResponse(Collections.singletonMap(tp, Errors.NONE.code())));
+
+        AtomicBoolean success = new AtomicBoolean(false);
+        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, new OffsetAndMetadata(100L)), callback(success));
+        consumerClient.poll(0);
+        assertTrue(success.get());
     }
 
     @Test
@@ -331,7 +400,7 @@ public class CoordinatorTest {
         client.prepareResponse(consumerMetadataResponse(node, Errors.NONE.code()));
         coordinator.ensureCoordinatorKnown();
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.CONSUMER_COORDINATOR_NOT_AVAILABLE.code())));
-        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, 100L), null);
+        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, new OffsetAndMetadata(100L)), null);
         consumerClient.poll(0);
         assertEquals(invokedBeforeTest + 1, defaultOffsetCommitCallback.invoked);
         assertEquals(Errors.CONSUMER_COORDINATOR_NOT_AVAILABLE.exception(), defaultOffsetCommitCallback.exception);
@@ -345,7 +414,7 @@ public class CoordinatorTest {
         // async commit with coordinator not available
         MockCommitCallback cb = new MockCommitCallback();
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.CONSUMER_COORDINATOR_NOT_AVAILABLE.code())));
-        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, 100L), cb);
+        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, new OffsetAndMetadata(100L)), cb);
         consumerClient.poll(0);
 
         assertTrue(coordinator.coordinatorUnknown());
@@ -361,7 +430,7 @@ public class CoordinatorTest {
         // async commit with not coordinator
         MockCommitCallback cb = new MockCommitCallback();
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.NOT_COORDINATOR_FOR_CONSUMER.code())));
-        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, 100L), cb);
+        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, new OffsetAndMetadata(100L)), cb);
         consumerClient.poll(0);
 
         assertTrue(coordinator.coordinatorUnknown());
@@ -377,7 +446,7 @@ public class CoordinatorTest {
         // async commit with coordinator disconnected
         MockCommitCallback cb = new MockCommitCallback();
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.NONE.code())), true);
-        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, 100L), cb);
+        coordinator.commitOffsetsAsync(Collections.singletonMap(tp, new OffsetAndMetadata(100L)), cb);
         consumerClient.poll(0);
 
         assertTrue(coordinator.coordinatorUnknown());
@@ -394,7 +463,7 @@ public class CoordinatorTest {
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.NOT_COORDINATOR_FOR_CONSUMER.code())));
         client.prepareResponse(consumerMetadataResponse(node, Errors.NONE.code()));
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.NONE.code())));
-        coordinator.commitOffsetsSync(Collections.singletonMap(tp, 100L));
+        coordinator.commitOffsetsSync(Collections.singletonMap(tp, new OffsetAndMetadata(100L)));
     }
 
     @Test
@@ -406,7 +475,7 @@ public class CoordinatorTest {
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.CONSUMER_COORDINATOR_NOT_AVAILABLE.code())));
         client.prepareResponse(consumerMetadataResponse(node, Errors.NONE.code()));
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.NONE.code())));
-        coordinator.commitOffsetsSync(Collections.singletonMap(tp, 100L));
+        coordinator.commitOffsetsSync(Collections.singletonMap(tp, new OffsetAndMetadata(100L)));
     }
 
     @Test
@@ -418,7 +487,17 @@ public class CoordinatorTest {
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.NONE.code())), true);
         client.prepareResponse(consumerMetadataResponse(node, Errors.NONE.code()));
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.NONE.code())));
-        coordinator.commitOffsetsSync(Collections.singletonMap(tp, 100L));
+        coordinator.commitOffsetsSync(Collections.singletonMap(tp, new OffsetAndMetadata(100L)));
+    }
+
+    @Test(expected = OffsetMetadataTooLarge.class)
+    public void testCommitOffsetMetadataTooLarge() {
+        // since offset metadata is provided by the user, we have to propagate the exception so they can handle it
+        client.prepareResponse(consumerMetadataResponse(node, Errors.NONE.code()));
+        coordinator.ensureCoordinatorKnown();
+
+        client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.OFFSET_METADATA_TOO_LARGE.code())));
+        coordinator.commitOffsetsSync(Collections.singletonMap(tp, new OffsetAndMetadata(100L, "metadata")));
     }
 
     @Test(expected = ApiException.class)
@@ -428,7 +507,7 @@ public class CoordinatorTest {
 
         // sync commit with invalid partitions should throw if we have no callback
         client.prepareResponse(offsetCommitResponse(Collections.singletonMap(tp, Errors.COMMITTING_PARTITIONS_NOT_ASSIGNED.code())), false);
-        coordinator.commitOffsetsSync(Collections.singletonMap(tp, 100L));
+        coordinator.commitOffsetsSync(Collections.singletonMap(tp, new OffsetAndMetadata(100L)));
     }
 
     @Test
@@ -441,7 +520,7 @@ public class CoordinatorTest {
         client.prepareResponse(offsetFetchResponse(tp, Errors.NONE.code(), "", 100L));
         coordinator.refreshCommittedOffsetsIfNeeded();
         assertFalse(subscriptions.refreshCommitsNeeded());
-        assertEquals(100L, (long) subscriptions.committed(tp));
+        assertEquals(100L, subscriptions.committed(tp).offset());
     }
 
     @Test
@@ -455,7 +534,7 @@ public class CoordinatorTest {
         client.prepareResponse(offsetFetchResponse(tp, Errors.NONE.code(), "", 100L));
         coordinator.refreshCommittedOffsetsIfNeeded();
         assertFalse(subscriptions.refreshCommitsNeeded());
-        assertEquals(100L, (long) subscriptions.committed(tp));
+        assertEquals(100L, subscriptions.committed(tp).offset());
     }
 
     @Test
@@ -470,7 +549,7 @@ public class CoordinatorTest {
         client.prepareResponse(offsetFetchResponse(tp, Errors.NONE.code(), "", 100L));
         coordinator.refreshCommittedOffsetsIfNeeded();
         assertFalse(subscriptions.refreshCommitsNeeded());
-        assertEquals(100L, (long) subscriptions.committed(tp));
+        assertEquals(100L, subscriptions.committed(tp).offset());
     }
 
     @Test
@@ -515,7 +594,7 @@ public class CoordinatorTest {
     private OffsetCommitCallback callback(final AtomicBoolean success) {
         return new OffsetCommitCallback() {
             @Override
-            public void onComplete(Map<TopicPartition, Long> offsets, Exception exception) {
+            public void onComplete(Map<TopicPartition, OffsetAndMetadata> offsets, Exception exception) {
                 if (exception == null)
                     success.set(true);
             }
@@ -527,13 +606,13 @@ public class CoordinatorTest {
         public Exception exception = null;
 
         @Override
-        public void onComplete(Map<TopicPartition, Long> offsets, Exception exception) {
+        public void onComplete(Map<TopicPartition, OffsetAndMetadata> offsets, Exception exception) {
             invoked++;
             this.exception = exception;
         }
     }
 
-    private static class MockSubscriptionListener extends SubscriptionState.RebalanceListener {
+    private static class MockRebalanceListener implements ConsumerRebalanceListener {
         public Collection<TopicPartition> revoked;
         public Collection<TopicPartition> assigned;
         public int revokedCount = 0;

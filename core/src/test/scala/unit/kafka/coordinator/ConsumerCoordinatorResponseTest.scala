@@ -21,12 +21,12 @@ package kafka.coordinator
 import java.util.concurrent.TimeUnit
 
 import org.junit.Assert._
-import kafka.common.TopicAndPartition
+import kafka.common.{OffsetAndMetadata, TopicAndPartition}
 import kafka.server.{OffsetManager, KafkaConfig}
 import kafka.utils.TestUtils
 import org.apache.kafka.common.protocol.Errors
-import org.apache.kafka.common.requests.JoinGroupRequest
-import org.easymock.EasyMock
+import org.apache.kafka.common.requests.{OffsetCommitRequest, JoinGroupRequest}
+import org.easymock.{IAnswer, EasyMock}
 import org.junit.{After, Before, Test}
 import org.scalatest.junit.JUnitSuite
 
@@ -41,6 +41,10 @@ class ConsumerCoordinatorResponseTest extends JUnitSuite {
   type JoinGroupCallback = (Set[TopicAndPartition], String, Int, Short) => Unit
   type HeartbeatCallbackParams = Short
   type HeartbeatCallback = Short => Unit
+  type CommitOffsetCallbackParams = Map[TopicAndPartition, Short]
+  type CommitOffsetCallback = Map[TopicAndPartition, Short] => Unit
+  type LeaveGroupCallbackParams = Short
+  type LeaveGroupCallback = Short => Unit
 
   val ConsumerMinSessionTimeout = 10
   val ConsumerMaxSessionTimeout = 200
@@ -232,7 +236,30 @@ class ConsumerCoordinatorResponseTest extends JUnitSuite {
   }
 
   @Test
-  def testHeartbeatDuringRebalanceCausesIllegalGeneration() {
+  def testCommitOffsetFromUnknownGroup() {
+    val groupId = "groupId"
+    val consumerId = "consumer"
+    val generationId = 1
+    val tp = new TopicAndPartition("topic", 0)
+    val offset = OffsetAndMetadata(0)
+
+    val commitOffsetResult = commitOffsets(groupId, consumerId, generationId, Map(tp -> offset), true)
+    assertEquals(Errors.ILLEGAL_GENERATION.code, commitOffsetResult(tp))
+  }
+
+  @Test
+  def testCommitOffsetWithDefaultGeneration() {
+    val groupId = "groupId"
+    val tp = new TopicAndPartition("topic", 0)
+    val offset = OffsetAndMetadata(0)
+
+    val commitOffsetResult = commitOffsets(groupId, OffsetCommitRequest.DEFAULT_CONSUMER_ID,
+      OffsetCommitRequest.DEFAULT_GENERATION_ID, Map(tp -> offset), true)
+    assertEquals(Errors.NONE.code, commitOffsetResult(tp))
+  }
+
+  @Test
+  def testHeartbeatDuringRebalanceCausesRebalanceInProgress() {
     val groupId = "groupId"
     val partitionAssignmentStrategy = "range"
 
@@ -249,10 +276,10 @@ class ConsumerCoordinatorResponseTest extends JUnitSuite {
     sendJoinGroup(groupId, JoinGroupRequest.UNKNOWN_CONSUMER_ID, partitionAssignmentStrategy,
       DefaultSessionTimeout, isCoordinatorForGroup = true)
 
-    // We should be in the middle of a rebalance, so the heartbeat should return illegal generation
+    // We should be in the middle of a rebalance, so the heartbeat should return rebalance in progress
     EasyMock.reset(offsetManager)
     val heartbeatResult = heartbeat(groupId, assignedConsumerId, initialGenerationId, isCoordinatorForGroup = true)
-    assertEquals(Errors.ILLEGAL_GENERATION.code, heartbeatResult)
+    assertEquals(Errors.REBALANCE_IN_PROGRESS.code, heartbeatResult)
   }
 
   @Test
@@ -276,6 +303,56 @@ class ConsumerCoordinatorResponseTest extends JUnitSuite {
     assertEquals(Errors.NONE.code, otherJoinGroupErrorCode)
   }
 
+  @Test
+  def testLeaveGroupWrongCoordinator() {
+    val groupId = "groupId"
+    val consumerId = JoinGroupRequest.UNKNOWN_CONSUMER_ID
+
+    val leaveGroupResult = leaveGroup(groupId, consumerId, isCoordinatorForGroup = false)
+    assertEquals(Errors.NOT_COORDINATOR_FOR_CONSUMER.code, leaveGroupResult)
+  }
+
+  @Test
+  def testLeaveGroupUnknownGroup() {
+    val groupId = "groupId"
+    val consumerId = "consumerId"
+
+    val leaveGroupResult = leaveGroup(groupId, consumerId, isCoordinatorForGroup = true)
+    assertEquals(Errors.UNKNOWN_CONSUMER_ID.code, leaveGroupResult)
+  }
+
+  @Test
+  def testLeaveGroupUnknownConsumerExistingGroup() {
+    val groupId = "groupId"
+    val consumerId = JoinGroupRequest.UNKNOWN_CONSUMER_ID
+    val otherConsumerId = "consumerId"
+    val partitionAssignmentStrategy = "range"
+
+    val joinGroupResult = joinGroup(groupId, consumerId, partitionAssignmentStrategy, DefaultSessionTimeout, isCoordinatorForGroup = true)
+    val joinGroupErrorCode = joinGroupResult._4
+    assertEquals(Errors.NONE.code, joinGroupErrorCode)
+
+    EasyMock.reset(offsetManager)
+    val leaveGroupResult = leaveGroup(groupId, otherConsumerId, isCoordinatorForGroup = true)
+    assertEquals(Errors.UNKNOWN_CONSUMER_ID.code, leaveGroupResult)
+  }
+
+  @Test
+  def testValidLeaveGroup() {
+    val groupId = "groupId"
+    val consumerId = JoinGroupRequest.UNKNOWN_CONSUMER_ID
+    val partitionAssignmentStrategy = "range"
+
+    val joinGroupResult = joinGroup(groupId, consumerId, partitionAssignmentStrategy, DefaultSessionTimeout, isCoordinatorForGroup = true)
+    val assignedConsumerId = joinGroupResult._2
+    val joinGroupErrorCode = joinGroupResult._4
+    assertEquals(Errors.NONE.code, joinGroupErrorCode)
+
+    EasyMock.reset(offsetManager)
+    val leaveGroupResult = leaveGroup(groupId, assignedConsumerId, isCoordinatorForGroup = true)
+    assertEquals(Errors.NONE.code, leaveGroupResult)
+  }
+
   private def setupJoinGroupCallback: (Future[JoinGroupCallbackParams], JoinGroupCallback) = {
     val responsePromise = Promise[JoinGroupCallbackParams]
     val responseFuture = responsePromise.future
@@ -288,6 +365,20 @@ class ConsumerCoordinatorResponseTest extends JUnitSuite {
     val responsePromise = Promise[HeartbeatCallbackParams]
     val responseFuture = responsePromise.future
     val responseCallback: HeartbeatCallback = errorCode => responsePromise.success(errorCode)
+    (responseFuture, responseCallback)
+  }
+
+  private def setupCommitOffsetsCallback: (Future[CommitOffsetCallbackParams], CommitOffsetCallback) = {
+    val responsePromise = Promise[CommitOffsetCallbackParams]
+    val responseFuture = responsePromise.future
+    val responseCallback: CommitOffsetCallback = offsets => responsePromise.success(offsets)
+    (responseFuture, responseCallback)
+  }
+
+  private def setupLeaveGroupCallback: (Future[LeaveGroupCallbackParams], LeaveGroupCallback) = {
+    val responsePromise = Promise[LeaveGroupCallbackParams]
+    val responseFuture = responsePromise.future
+    val responseCallback: LeaveGroupCallback = errorCode => responsePromise.success(errorCode)
     (responseFuture, responseCallback)
   }
 
@@ -323,6 +414,34 @@ class ConsumerCoordinatorResponseTest extends JUnitSuite {
     EasyMock.expect(offsetManager.leaderIsLocal(1)).andReturn(isCoordinatorForGroup)
     EasyMock.replay(offsetManager)
     consumerCoordinator.handleHeartbeat(groupId, consumerId, generationId, responseCallback)
+    Await.result(responseFuture, Duration(40, TimeUnit.MILLISECONDS))
+  }
+
+  private def commitOffsets(groupId: String,
+                            consumerId: String,
+                            generationId: Int,
+                            offsets: Map[TopicAndPartition, OffsetAndMetadata],
+                            isCoordinatorForGroup: Boolean): CommitOffsetCallbackParams = {
+    val (responseFuture, responseCallback) = setupCommitOffsetsCallback
+    EasyMock.expect(offsetManager.partitionFor(groupId)).andReturn(1)
+    EasyMock.expect(offsetManager.leaderIsLocal(1)).andReturn(isCoordinatorForGroup)
+    val storeOffsetAnswer = new IAnswer[Unit] {
+      override def answer = responseCallback.apply(offsets.mapValues(_ => Errors.NONE.code))
+    }
+    EasyMock.expect(offsetManager.storeOffsets(groupId, consumerId, generationId, offsets, responseCallback))
+      .andAnswer(storeOffsetAnswer)
+    EasyMock.replay(offsetManager)
+    consumerCoordinator.handleCommitOffsets(groupId, consumerId, generationId, offsets, responseCallback)
+    Await.result(responseFuture, Duration(40, TimeUnit.MILLISECONDS))
+    Await.result(responseFuture, Duration(40, TimeUnit.MILLISECONDS))
+  }
+
+  private def leaveGroup(groupId: String, consumerId: String, isCoordinatorForGroup: Boolean): LeaveGroupCallbackParams = {
+    val (responseFuture, responseCallback) = setupHeartbeatCallback
+    EasyMock.expect(offsetManager.partitionFor(groupId)).andReturn(1)
+    EasyMock.expect(offsetManager.leaderIsLocal(1)).andReturn(isCoordinatorForGroup)
+    EasyMock.replay(offsetManager)
+    consumerCoordinator.handleLeaveGroup(groupId, consumerId, responseCallback)
     Await.result(responseFuture, Duration(40, TimeUnit.MILLISECONDS))
   }
 }

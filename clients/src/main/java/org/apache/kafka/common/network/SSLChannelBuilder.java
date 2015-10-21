@@ -12,6 +12,7 @@
  */
 package org.apache.kafka.common.network;
 
+import java.io.IOException;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.util.Map;
@@ -28,18 +29,20 @@ public class SSLChannelBuilder implements ChannelBuilder {
     private static final Logger log = LoggerFactory.getLogger(SSLChannelBuilder.class);
     private SSLFactory sslFactory;
     private PrincipalBuilder principalBuilder;
-    private SSLFactory.Mode mode;
+    private Mode mode;
+    private Map<String, ?> configs;
 
-    public SSLChannelBuilder(SSLFactory.Mode mode) {
+    public SSLChannelBuilder(Mode mode) {
         this.mode = mode;
     }
 
     public void configure(Map<String, ?> configs) throws KafkaException {
         try {
+            this.configs = configs;
             this.sslFactory = new SSLFactory(mode);
-            this.sslFactory.configure(configs);
+            this.sslFactory.configure(this.configs);
             this.principalBuilder = (PrincipalBuilder) Utils.newInstance((Class<?>) configs.get(SSLConfigs.PRINCIPAL_BUILDER_CLASS_CONFIG));
-            this.principalBuilder.configure(configs);
+            this.principalBuilder.configure(this.configs);
         } catch (Exception e) {
             throw new KafkaException(e);
         }
@@ -48,12 +51,9 @@ public class SSLChannelBuilder implements ChannelBuilder {
     public KafkaChannel buildChannel(String id, SelectionKey key, int maxReceiveSize) throws KafkaException {
         KafkaChannel channel = null;
         try {
-            SocketChannel socketChannel = (SocketChannel) key.channel();
-            SSLTransportLayer transportLayer = new SSLTransportLayer(id, key,
-                                                                     sslFactory.createSSLEngine(socketChannel.socket().getInetAddress().getHostName(),
-                                                                                                socketChannel.socket().getPort()));
+            SSLTransportLayer transportLayer = buildTransportLayer(sslFactory, id, key);
             Authenticator authenticator = new DefaultAuthenticator();
-            authenticator.configure(transportLayer, this.principalBuilder);
+            authenticator.configure(transportLayer, this.principalBuilder, this.configs);
             channel = new KafkaChannel(id, transportLayer, authenticator, maxReceiveSize);
         } catch (Exception e) {
             log.info("Failed to create channel due to ", e);
@@ -64,5 +64,12 @@ public class SSLChannelBuilder implements ChannelBuilder {
 
     public void close()  {
         this.principalBuilder.close();
+    }
+
+    protected SSLTransportLayer buildTransportLayer(SSLFactory sslFactory, String id, SelectionKey key) throws IOException {
+        SocketChannel socketChannel = (SocketChannel) key.channel();
+        return SSLTransportLayer.create(id, key,
+            sslFactory.createSSLEngine(socketChannel.socket().getInetAddress().getHostName(),
+            socketChannel.socket().getPort()));
     }
 }

@@ -22,7 +22,7 @@ import java.util.Properties
 import junit.framework.Assert._
 import kafka.api.{ApiVersion, KAFKA_082}
 import kafka.message._
-import kafka.utils.{TestUtils, CoreUtils}
+import kafka.utils.{CoreUtils, TestUtils}
 import org.apache.kafka.common.config.ConfigException
 import org.apache.kafka.common.protocol.SecurityProtocol
 import org.junit.{Assert, Test}
@@ -404,9 +404,10 @@ class KafkaConfigTest {
         case KafkaConfig.NumIoThreadsProp => assertPropertyInvalid(getBaseProperties(), name, "not_a_number", "0")
         case KafkaConfig.BackgroundThreadsProp => assertPropertyInvalid(getBaseProperties(), name, "not_a_number", "0")
         case KafkaConfig.QueuedMaxRequestsProp => assertPropertyInvalid(getBaseProperties(), name, "not_a_number", "0")
+        case KafkaConfig.RequestTimeoutMsProp => assertPropertyInvalid(getBaseProperties(), name, "not_a_number")
 
         case KafkaConfig.AuthorizerClassNameProp => //ignore string
-
+          
         case KafkaConfig.PortProp => assertPropertyInvalid(getBaseProperties(), name, "not_a_number")
         case KafkaConfig.HostNameProp => // ignore string
         case KafkaConfig.AdvertisedHostNameProp => //ignore string
@@ -504,6 +505,15 @@ class KafkaConfigTest {
         case KafkaConfig.SSLKeyManagerAlgorithmProp =>
         case KafkaConfig.SSLTrustManagerAlgorithmProp =>
         case KafkaConfig.SSLClientAuthProp => // ignore string
+        case KafkaConfig.SSLCipherSuitesProp => // ignore string
+
+        //Sasl Configs
+        case KafkaConfig.SaslKerberosServiceNameProp => // ignore string
+        case KafkaConfig.SaslKerberosKinitCmdProp =>
+        case KafkaConfig.SaslKerberosTicketRenewWindowFactorProp =>
+        case KafkaConfig.SaslKerberosTicketRenewJitterProp =>
+        case KafkaConfig.SaslKerberosMinTimeBeforeReloginProp =>
+        case KafkaConfig.AuthToLocalProp => // ignore string
 
         case nonNegativeIntProperty => assertPropertyInvalid(getBaseProperties(), name, "not_a_number", "-1")
       }

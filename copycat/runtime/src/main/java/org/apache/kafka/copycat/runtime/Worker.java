@@ -52,15 +52,15 @@ public class Worker {
     private WorkerConfig config;
     private Converter keyConverter;
     private Converter valueConverter;
-    private Converter offsetKeyConverter;
-    private Converter offsetValueConverter;
+    private Converter internalKeyConverter;
+    private Converter internalValueConverter;
     private OffsetBackingStore offsetBackingStore;
     private HashMap<ConnectorTaskId, WorkerTask> tasks = new HashMap<>();
     private KafkaProducer<byte[], byte[]> producer;
     private SourceTaskOffsetCommitter sourceTaskOffsetCommitter;
 
-    public Worker(WorkerConfig config) {
-        this(new SystemTime(), config, null);
+    public Worker(WorkerConfig config, OffsetBackingStore offsetBackingStore) {
+        this(new SystemTime(), config, offsetBackingStore);
     }
 
     @SuppressWarnings("unchecked")
@@ -71,17 +71,13 @@ public class Worker {
         this.keyConverter.configure(config.originalsWithPrefix("key.converter."), true);
         this.valueConverter = config.getConfiguredInstance(WorkerConfig.VALUE_CONVERTER_CLASS_CONFIG, Converter.class);
         this.valueConverter.configure(config.originalsWithPrefix("value.converter."), false);
-        this.offsetKeyConverter = config.getConfiguredInstance(WorkerConfig.OFFSET_KEY_CONVERTER_CLASS_CONFIG, Converter.class);
-        this.offsetKeyConverter.configure(config.originalsWithPrefix("offset.key.converter."), true);
-        this.offsetValueConverter = config.getConfiguredInstance(WorkerConfig.OFFSET_VALUE_CONVERTER_CLASS_CONFIG, Converter.class);
-        this.offsetValueConverter.configure(config.originalsWithPrefix("offset.value.converter."), false);
+        this.internalKeyConverter = config.getConfiguredInstance(WorkerConfig.INTERNAL_KEY_CONVERTER_CLASS_CONFIG, Converter.class);
+        this.internalKeyConverter.configure(config.originalsWithPrefix("internal.key.converter."), true);
+        this.internalValueConverter = config.getConfiguredInstance(WorkerConfig.INTERNAL_VALUE_CONVERTER_CLASS_CONFIG, Converter.class);
+        this.internalValueConverter.configure(config.originalsWithPrefix("internal.value.converter."), false);
 
-        if (offsetBackingStore != null) {
-            this.offsetBackingStore = offsetBackingStore;
-        } else {
-            this.offsetBackingStore = new FileOffsetBackingStore();
-            this.offsetBackingStore.configure(config.originals());
-        }
+        this.offsetBackingStore = offsetBackingStore;
+        this.offsetBackingStore.configure(config.originals());
     }
 
     public void start() {
@@ -132,7 +128,7 @@ public class Worker {
         long timeoutMs = limit - time.milliseconds();
         sourceTaskOffsetCommitter.close(timeoutMs);
 
-        offsetBackingStore.start();
+        offsetBackingStore.stop();
 
         log.info("Worker stopped");
     }
@@ -161,9 +157,9 @@ public class Worker {
         if (task instanceof SourceTask) {
             SourceTask sourceTask = (SourceTask) task;
             OffsetStorageReader offsetReader = new OffsetStorageReaderImpl(offsetBackingStore, id.connector(),
-                    offsetKeyConverter, offsetValueConverter);
+                    internalKeyConverter, internalValueConverter);
             OffsetStorageWriter offsetWriter = new OffsetStorageWriter(offsetBackingStore, id.connector(),
-                    offsetKeyConverter, offsetValueConverter);
+                    internalKeyConverter, internalValueConverter);
             workerTask = new WorkerSourceTask(id, sourceTask, keyConverter, valueConverter, producer,
                     offsetReader, offsetWriter, config, time);
         } else if (task instanceof SinkTask) {
@@ -205,4 +201,11 @@ public class Worker {
         return task;
     }
 
+    public Converter getInternalKeyConverter() {
+        return internalKeyConverter;
+    }
+
+    public Converter getInternalValueConverter() {
+        return internalValueConverter;
+    }
 }

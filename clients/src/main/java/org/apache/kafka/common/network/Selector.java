@@ -12,9 +12,7 @@
  */
 package org.apache.kafka.common.network;
 
-import java.io.EOFException;
 import java.io.IOException;
-import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.channels.*;
@@ -179,17 +177,6 @@ public class Selector implements Selectable {
     }
 
     /**
-     * Disconnect any connections for the given id (if there are any). The disconnection is asynchronous and will not be
-     * processed until the next {@link #poll(long) poll()} call.
-     */
-    @Override
-    public void disconnect(String id) {
-        KafkaChannel channel = this.channels.get(id);
-        if (channel != null)
-            channel.disconnect();
-    }
-
-    /**
      * Interrupt the nioSelector if it is blocked waiting to do I/O.
      */
     @Override
@@ -213,6 +200,7 @@ public class Selector implements Selectable {
             log.error("Exception closing nioSelector:", se);
         }
         sensors.close();
+        channelBuilder.close();
     }
 
     /**
@@ -220,10 +208,7 @@ public class Selector implements Selectable {
      * @param send The request to send
      */
     public void send(Send send) {
-        KafkaChannel channel = channelForId(send.destination());
-        if (channel == null)
-            throw new IllegalStateException("channel is not connected");
-
+        KafkaChannel channel = channelOrFail(send.destination());
         try {
             channel.setSend(send);
         } catch (CancelledKeyException e) {
@@ -252,12 +237,16 @@ public class Selector implements Selectable {
      * the poll to add the completedReceives. If there are any active channels in the "stagedReceives" we set "timeout" to 0
      * and pop response and add to the completedReceives.
      *
-     * @param timeout The amount of time to wait, in milliseconds. If negative, wait indefinitely.
+     * @param timeout The amount of time to wait, in milliseconds, which must be non-negative
+     * @throws IllegalArgumentException If `timeout` is negative
      * @throws IllegalStateException If a send is given for which we have no existing connection or for which there is
      *         already an in-progress send
+     * @throws InvalidReceiveException If invalid data is received
      */
     @Override
     public void poll(long timeout) throws IOException {
+        if (timeout < 0)
+            throw new IllegalArgumentException("timeout should be >= 0");
         clear();
         if (hasStagedReceives())
             timeout = 0;
@@ -323,10 +312,7 @@ public class Selector implements Selectable {
                     }
                 } catch (IOException e) {
                     String desc = channel.socketDescription();
-                    if (e instanceof EOFException || e instanceof ConnectException)
-                        log.debug("Connection {} disconnected", desc);
-                    else
-                        log.warn("Error in I/O with connection to {}", desc, e);
+                    log.debug("Connection with {} disconnected", desc, e);
                     close(channel);
                     this.disconnected.add(channel.id());
                 }
@@ -364,7 +350,7 @@ public class Selector implements Selectable {
 
     @Override
     public void mute(String id) {
-        KafkaChannel channel = channelForId(id);
+        KafkaChannel channel = channelOrFail(id);
         mute(channel);
     }
 
@@ -374,7 +360,7 @@ public class Selector implements Selectable {
 
     @Override
     public void unmute(String id) {
-        KafkaChannel channel = channelForId(id);
+        KafkaChannel channel = channelOrFail(id);
         unmute(channel);
     }
 
@@ -430,22 +416,23 @@ public class Selector implements Selectable {
     /**
      * Check for data, waiting up to the given timeout.
      *
-     * @param ms Length of time to wait, in milliseconds. If negative, wait indefinitely.
+     * @param ms Length of time to wait, in milliseconds, which must be non-negative
      * @return The number of keys ready
+     * @throws IllegalArgumentException
      * @throws IOException
      */
     private int select(long ms) throws IOException {
+        if (ms < 0L)
+            throw new IllegalArgumentException("timeout should be >= 0");
+
         if (ms == 0L)
             return this.nioSelector.selectNow();
-        else if (ms < 0L)
-            return this.nioSelector.select();
         else
             return this.nioSelector.select(ms);
     }
 
     /**
-     * Begin closing this connection
-     * @param id channel id
+     * Close the connection identified by the given id
      */
     public void close(String id) {
         KafkaChannel channel = this.channels.get(id);
@@ -474,20 +461,32 @@ public class Selector implements Selectable {
      */
     @Override
     public boolean isChannelReady(String id) {
-        KafkaChannel channel = channelForId(id);
+        KafkaChannel channel = this.channels.get(id);
+        if (channel == null)
+            return false;
         return channel.ready();
     }
 
-    /**
-     * Get the channel associated with this connection
-     * Exposing this to allow SocketServer get the Principal from the channel when creating a request
-     * without making Selector know about Principals
-     */
-    public KafkaChannel channelForId(String id) {
+    private KafkaChannel channelOrFail(String id) {
         KafkaChannel channel = this.channels.get(id);
         if (channel == null)
-            throw new IllegalStateException("Attempt to write to socket for which there is no open connection. Connection id " + id + " existing connections " + channels.keySet().toString());
+            throw new IllegalStateException("Attempt to retrieve channel for which there is no open connection. Connection id " + id + " existing connections " + channels.keySet().toString());
         return channel;
+    }
+
+    /**
+     * Return the selector channels.
+     */
+    public List<KafkaChannel> channels() {
+        return new ArrayList<>(channels.values());
+    }
+
+    /**
+     * Return the channel associated with this connection or `null` if there is no channel associated with the
+     * connection.
+     */
+    public KafkaChannel channel(String id) {
+        return this.channels.get(id);
     }
 
     /**

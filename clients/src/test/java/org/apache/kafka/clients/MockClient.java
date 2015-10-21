@@ -100,7 +100,7 @@ public class MockClient implements KafkaClient {
     }
 
     @Override
-    public void send(ClientRequest request) {
+    public void send(ClientRequest request, long now) {
         if (!futureResponses.isEmpty()) {
             FutureResponse futureResp = futureResponses.poll();
             if (!futureResp.requestMatcher.matches(request))
@@ -109,6 +109,7 @@ public class MockClient implements KafkaClient {
             ClientResponse resp = new ClientResponse(request, time.milliseconds(), futureResp.disconnected, futureResp.responseBody);
             responses.add(resp);
         } else {
+            request.setSendTimeMs(now);
             this.requests.add(request);
         }
     }
@@ -124,19 +125,6 @@ public class MockClient implements KafkaClient {
         }
 
         return copy;
-    }
-
-    @Override
-    public List<ClientResponse> completeAll(String node, long now) {
-        return completeAll(now);
-    }
-
-    @Override
-    public List<ClientResponse> completeAll(long now) {
-        List<ClientResponse> responses = poll(0, now);
-        if (requests.size() > 0)
-            throw new IllegalStateException("Requests without responses remain.");
-        return responses;
     }
 
     public Queue<ClientRequest> requests() {
