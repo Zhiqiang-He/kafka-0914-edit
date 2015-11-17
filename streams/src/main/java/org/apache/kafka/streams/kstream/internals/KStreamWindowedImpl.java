@@ -17,18 +17,22 @@
 
 package org.apache.kafka.streams.kstream.internals;
 
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.streams.kstream.KStream;
+import org.apache.kafka.streams.kstream.KStreamBuilder;
 import org.apache.kafka.streams.kstream.KStreamWindowed;
 import org.apache.kafka.streams.kstream.ValueJoiner;
 import org.apache.kafka.streams.kstream.WindowSupplier;
-import org.apache.kafka.streams.processor.TopologyBuilder;
+
+import java.util.HashSet;
+import java.util.Set;
 
 public final class KStreamWindowedImpl<K, V> extends KStreamImpl<K, V> implements KStreamWindowed<K, V> {
 
     private final WindowSupplier<K, V> windowSupplier;
 
-    public KStreamWindowedImpl(TopologyBuilder topology, String name, WindowSupplier<K, V> windowSupplier) {
-        super(topology, name);
+    public KStreamWindowedImpl(KStreamBuilder topology, String name, Set<String> sourceNodes, WindowSupplier<K, V> windowSupplier) {
+        super(topology, name, sourceNodes);
         this.windowSupplier = windowSupplier;
     }
 
@@ -36,19 +40,28 @@ public final class KStreamWindowedImpl<K, V> extends KStreamImpl<K, V> implement
     public <V1, V2> KStream<K, V2> join(KStreamWindowed<K, V1> other, ValueJoiner<V, V1, V2> valueJoiner) {
         String thisWindowName = this.windowSupplier.name();
         String otherWindowName = ((KStreamWindowedImpl<K, V1>) other).windowSupplier.name();
+        Set<String> thisSourceNodes = this.sourceNodes;
+        Set<String> otherSourceNodes = ((KStreamWindowedImpl<K, V1>) other).sourceNodes;
+
+        if (thisSourceNodes == null || otherSourceNodes == null)
+            throw new KafkaException("not joinable");
+
+        Set<String> allSourceNodes = new HashSet<>(sourceNodes);
+        allSourceNodes.addAll(((KStreamWindowedImpl<K, V1>) other).sourceNodes);
 
         KStreamJoin<K, V2, V, V1> joinThis = new KStreamJoin<>(otherWindowName, valueJoiner);
         KStreamJoin<K, V2, V1, V> joinOther = new KStreamJoin<>(thisWindowName, KStreamJoin.reverseJoiner(valueJoiner));
         KStreamPassThrough<K, V2> joinMerge = new KStreamPassThrough<>();
 
-        String joinThisName = JOINTHIS_NAME + INDEX.getAndIncrement();
-        String joinOtherName = JOINOTHER_NAME + INDEX.getAndIncrement();
-        String joinMergeName = JOINMERGE_NAME + INDEX.getAndIncrement();
+        String joinThisName = topology.newName(JOINTHIS_NAME);
+        String joinOtherName = topology.newName(JOINOTHER_NAME);
+        String joinMergeName = topology.newName(JOINMERGE_NAME);
 
         topology.addProcessor(joinThisName, joinThis, this.name);
         topology.addProcessor(joinOtherName, joinOther, ((KStreamImpl) other).name);
         topology.addProcessor(joinMergeName, joinMerge, joinThisName, joinOtherName);
+        topology.copartitionSources(allSourceNodes);
 
-        return new KStreamImpl<>(topology, joinMergeName);
+        return new KStreamImpl<>(topology, joinMergeName, allSourceNodes);
     }
 }

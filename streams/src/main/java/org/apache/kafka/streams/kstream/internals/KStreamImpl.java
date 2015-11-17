@@ -19,6 +19,7 @@ package org.apache.kafka.streams.kstream.internals;
 
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.Serializer;
+import org.apache.kafka.streams.kstream.KStreamBuilder;
 import org.apache.kafka.streams.kstream.KeyValue;
 import org.apache.kafka.streams.kstream.TransformerSupplier;
 import org.apache.kafka.streams.kstream.ValueTransformerSupplier;
@@ -29,10 +30,10 @@ import org.apache.kafka.streams.kstream.Predicate;
 import org.apache.kafka.streams.kstream.ValueMapper;
 import org.apache.kafka.streams.kstream.WindowSupplier;
 import org.apache.kafka.streams.processor.ProcessorSupplier;
-import org.apache.kafka.streams.processor.TopologyBuilder;
 
 import java.lang.reflect.Array;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Collections;
+import java.util.Set;
 
 public class KStreamImpl<K, V> implements KStream<K, V> {
 
@@ -68,93 +69,93 @@ public class KStreamImpl<K, V> implements KStream<K, V> {
 
     public static final String SOURCE_NAME = "KAFKA-SOURCE-";
 
-    public static final AtomicInteger INDEX = new AtomicInteger(1);
-
-    protected final TopologyBuilder topology;
+    protected final KStreamBuilder topology;
     protected final String name;
+    protected final Set<String> sourceNodes;
 
-    public KStreamImpl(TopologyBuilder topology, String name) {
+    public KStreamImpl(KStreamBuilder topology, String name, Set<String> sourceNodes) {
         this.topology = topology;
         this.name = name;
+        this.sourceNodes = sourceNodes;
     }
 
     @Override
     public KStream<K, V> filter(Predicate<K, V> predicate) {
-        String name = FILTER_NAME + INDEX.getAndIncrement();
+        String name = topology.newName(FILTER_NAME);
 
         topology.addProcessor(name, new KStreamFilter<>(predicate, false), this.name);
 
-        return new KStreamImpl<>(topology, name);
+        return new KStreamImpl<>(topology, name, sourceNodes);
     }
 
     @Override
     public KStream<K, V> filterOut(final Predicate<K, V> predicate) {
-        String name = FILTER_NAME + INDEX.getAndIncrement();
+        String name = topology.newName(FILTER_NAME);
 
         topology.addProcessor(name, new KStreamFilter<>(predicate, true), this.name);
 
-        return new KStreamImpl<>(topology, name);
+        return new KStreamImpl<>(topology, name, sourceNodes);
     }
 
     @Override
     public <K1, V1> KStream<K1, V1> map(KeyValueMapper<K, V, KeyValue<K1, V1>> mapper) {
-        String name = MAP_NAME + INDEX.getAndIncrement();
+        String name = topology.newName(MAP_NAME);
 
         topology.addProcessor(name, new KStreamMap<>(mapper), this.name);
 
-        return new KStreamImpl<>(topology, name);
+        return new KStreamImpl<>(topology, name, null);
     }
 
     @Override
     public <V1> KStream<K, V1> mapValues(ValueMapper<V, V1> mapper) {
-        String name = MAPVALUES_NAME + INDEX.getAndIncrement();
+        String name = topology.newName(MAPVALUES_NAME);
 
         topology.addProcessor(name, new KStreamMapValues<>(mapper), this.name);
 
-        return new KStreamImpl<>(topology, name);
+        return new KStreamImpl<>(topology, name, sourceNodes);
     }
 
     @Override
     public <K1, V1> KStream<K1, V1> flatMap(KeyValueMapper<K, V, Iterable<KeyValue<K1, V1>>> mapper) {
-        String name = FLATMAP_NAME + INDEX.getAndIncrement();
+        String name = topology.newName(FLATMAP_NAME);
 
         topology.addProcessor(name, new KStreamFlatMap<>(mapper), this.name);
 
-        return new KStreamImpl<>(topology, name);
+        return new KStreamImpl<>(topology, name, null);
     }
 
     @Override
     public <V1> KStream<K, V1> flatMapValues(ValueMapper<V, Iterable<V1>> mapper) {
-        String name = FLATMAPVALUES_NAME + INDEX.getAndIncrement();
+        String name = topology.newName(FLATMAPVALUES_NAME);
 
         topology.addProcessor(name, new KStreamFlatMapValues<>(mapper), this.name);
 
-        return new KStreamImpl<>(topology, name);
+        return new KStreamImpl<>(topology, name, sourceNodes);
     }
 
     @Override
     public KStreamWindowed<K, V> with(WindowSupplier<K, V> windowSupplier) {
-        String name = WINDOWED_NAME + INDEX.getAndIncrement();
+        String name = topology.newName(WINDOWED_NAME);
 
         topology.addProcessor(name, new KStreamWindow<>(windowSupplier), this.name);
 
-        return new KStreamWindowedImpl<>(topology, name, windowSupplier);
+        return new KStreamWindowedImpl<>(topology, name, sourceNodes, windowSupplier);
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public KStream<K, V>[] branch(Predicate<K, V>... predicates) {
-        String branchName = BRANCH_NAME + INDEX.getAndIncrement();
+        String branchName = topology.newName(BRANCH_NAME);
 
         topology.addProcessor(branchName, new KStreamBranch(predicates.clone()), this.name);
 
         KStream<K, V>[] branchChildren = (KStream<K, V>[]) Array.newInstance(KStream.class, predicates.length);
         for (int i = 0; i < predicates.length; i++) {
-            String childName = BRANCHCHILD_NAME + INDEX.getAndIncrement();
+            String childName = topology.newName(BRANCHCHILD_NAME);
 
             topology.addProcessor(childName, new KStreamPassThrough<K, V>(), branchName);
 
-            branchChildren[i] = new KStreamImpl<>(topology, childName);
+            branchChildren[i] = new KStreamImpl<>(topology, childName, sourceNodes);
         }
 
         return branchChildren;
@@ -166,15 +167,15 @@ public class KStreamImpl<K, V> implements KStream<K, V> {
                                             Serializer<V> valSerializer,
                                             Deserializer<K1> keyDeserializer,
                                             Deserializer<V1> valDeserializer) {
-        String sendName = SINK_NAME + INDEX.getAndIncrement();
+        String sendName = topology.newName(SINK_NAME);
 
         topology.addSink(sendName, topic, keySerializer, valSerializer, this.name);
 
-        String sourceName = SOURCE_NAME + INDEX.getAndIncrement();
+        String sourceName = topology.newName(SOURCE_NAME);
 
         topology.addSource(sourceName, keyDeserializer, valDeserializer, topic);
 
-        return new KStreamImpl<>(topology, sourceName);
+        return new KStreamImpl<>(topology, sourceName, Collections.singleton(sourceName));
     }
 
     @Override
@@ -184,40 +185,43 @@ public class KStreamImpl<K, V> implements KStream<K, V> {
 
     @Override
     public void to(String topic) {
-        String name = SINK_NAME + INDEX.getAndIncrement();
+        String name = topology.newName(SINK_NAME);
 
         topology.addSink(name, topic, this.name);
     }
 
     @Override
     public void to(String topic, Serializer<K> keySerializer, Serializer<V> valSerializer) {
-        String name = SINK_NAME + INDEX.getAndIncrement();
+        String name = topology.newName(SINK_NAME);
 
         topology.addSink(name, topic, keySerializer, valSerializer, this.name);
     }
 
     @Override
-    public <K1, V1> KStream<K1, V1> transform(TransformerSupplier<K, V, KeyValue<K1, V1>> transformerSupplier) {
-        String name = TRANSFORM_NAME + INDEX.getAndIncrement();
+    public <K1, V1> KStream<K1, V1> transform(TransformerSupplier<K, V, KeyValue<K1, V1>> transformerSupplier, String... stateStoreNames) {
+        String name = topology.newName(TRANSFORM_NAME);
 
         topology.addProcessor(name, new KStreamTransform<>(transformerSupplier), this.name);
+        topology.connectProcessorAndStateStores(name, stateStoreNames);
 
-        return new KStreamImpl<>(topology, name);
+        return new KStreamImpl<>(topology, name, null);
     }
 
     @Override
-    public <V1> KStream<K, V1> transformValues(ValueTransformerSupplier<V, V1> valueTransformerSupplier) {
-        String name = TRANSFORMVALUES_NAME + INDEX.getAndIncrement();
+    public <V1> KStream<K, V1> transformValues(ValueTransformerSupplier<V, V1> valueTransformerSupplier, String... stateStoreNames) {
+        String name = topology.newName(TRANSFORMVALUES_NAME);
 
         topology.addProcessor(name, new KStreamTransformValues<>(valueTransformerSupplier), this.name);
+        topology.connectProcessorAndStateStores(name, stateStoreNames);
 
-        return new KStreamImpl<>(topology, name);
+        return new KStreamImpl<>(topology, name, sourceNodes);
     }
 
     @Override
-    public void process(final ProcessorSupplier<K, V> processorSupplier) {
-        String name = PROCESSOR_NAME + INDEX.getAndIncrement();
+    public void process(final ProcessorSupplier<K, V> processorSupplier, String... stateStoreNames) {
+        String name = topology.newName(PROCESSOR_NAME);
 
         topology.addProcessor(name, processorSupplier, this.name);
+        topology.connectProcessorAndStateStores(name, stateStoreNames);
     }
 }

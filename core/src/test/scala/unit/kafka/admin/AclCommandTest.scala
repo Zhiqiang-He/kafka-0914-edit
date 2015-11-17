@@ -25,28 +25,27 @@ import kafka.server.KafkaConfig
 import kafka.utils.{Logging, TestUtils}
 import kafka.zk.ZooKeeperTestHarness
 import org.apache.kafka.common.security.auth.KafkaPrincipal
-import org.junit.{Assert, Test}
+import org.junit.Test
 
 class AclCommandTest extends ZooKeeperTestHarness with Logging {
 
-  private val Users = Set(KafkaPrincipal.fromString("User:test1"), KafkaPrincipal.fromString("User:test2"))
-  private val UsersString = Users.mkString(AclCommand.Delimiter.toString)
+  private val Users = Set(KafkaPrincipal.fromString("User:CN=writeuser,OU=Unknown,O=Unknown,L=Unknown,ST=Unknown,C=Unknown"), KafkaPrincipal.fromString("User:test2"))
   private val Hosts = Set("host1", "host2")
   private val HostsString = Hosts.mkString(AclCommand.Delimiter.toString)
 
   private val TopicResources = Set(new Resource(Topic, "test-1"), new Resource(Topic, "test-2"))
-  private val ConsumerGroupResources = Set(new Resource(ConsumerGroup, "testGroup-1"), new Resource(ConsumerGroup, "testGroup-2"))
+  private val GroupResources = Set(new Resource(Group, "testGroup-1"), new Resource(Group, "testGroup-2"))
 
   private val ResourceToCommand = Map[Set[Resource], Array[String]](
     TopicResources -> Array("--topic", "test-1,test-2"),
     Set(Resource.ClusterResource) -> Array("--cluster"),
-    ConsumerGroupResources -> Array("--consumer-group", "testGroup-1,testGroup-2")
+    GroupResources -> Array("--group", "testGroup-1,testGroup-2")
   )
 
   private val ResourceToOperations = Map[Set[Resource], (Set[Operation], Array[String])](
     TopicResources -> (Set(Read, Write, Describe), Array("--operations", "Read,Write,Describe")),
     Set(Resource.ClusterResource) -> (Set(Create, ClusterAction), Array("--operations", "Create,ClusterAction")),
-    ConsumerGroupResources -> (Set(Read).toSet[Operation], Array("--operations", "Read"))
+    GroupResources -> (Set(Read).toSet[Operation], Array("--operations", "Read"))
   )
 
   private val ProducerResourceToAcls = Map[Set[Resource], Set[Acl]](
@@ -56,7 +55,7 @@ class AclCommandTest extends ZooKeeperTestHarness with Logging {
 
   private val ConsumerResourceToAcls = Map[Set[Resource], Set[Acl]](
     TopicResources -> AclCommand.getAcls(Users, Allow, Set(Read, Describe), Hosts),
-    ConsumerGroupResources -> AclCommand.getAcls(Users, Allow, Set(Read), Hosts)
+    GroupResources -> AclCommand.getAcls(Users, Allow, Set(Read), Hosts)
   )
 
   private val CmdToResourcesToAcl = Map[Array[String], Map[Set[Resource], Set[Acl]]](
@@ -118,10 +117,11 @@ class AclCommandTest extends ZooKeeperTestHarness with Logging {
   }
 
   private def getCmd(permissionType: PermissionType): Array[String] = {
-    if (permissionType == Allow)
-      Array("--allow-principals", UsersString, "--allow-hosts", HostsString)
-    else
-      Array("--deny-principals", UsersString, "--deny-hosts", HostsString)
+    val principalCmd = if (permissionType == Allow) "--allow-principal" else "--deny-principal"
+    val hostCmd = if (permissionType == Allow) "--allow-hosts" else "--deny-hosts"
+
+    val cmd = Array(hostCmd, HostsString)
+    Users.foldLeft(cmd) ((cmd, user) => cmd ++ Array(principalCmd, user.toString))
   }
 
   def getAuthorizer(props: Properties): Authorizer = {

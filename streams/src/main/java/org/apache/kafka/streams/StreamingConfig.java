@@ -24,6 +24,11 @@ import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Type;
+import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.serialization.Serializer;
+import org.apache.kafka.streams.processor.DefaultPartitionGrouper;
+import org.apache.kafka.streams.processor.internals.KafkaStreamingPartitionAssignor;
+import org.apache.kafka.streams.processor.internals.StreamThread;
 
 import java.util.Map;
 
@@ -49,6 +54,10 @@ public class StreamingConfig extends AbstractConfig {
     public static final String NUM_STREAM_THREADS_CONFIG = "num.stream.threads";
     private static final String NUM_STREAM_THREADS_DOC = "The number of threads to execute stream processing.";
 
+    /** <code>num.stream.threads</code> */
+    public static final String NUM_STANDBY_REPLICAS_CONFIG = "num.standby.replicas";
+    private static final String NUM_STANDBY_REPLICAS_DOC = "The number of standby replicas for each task.";
+
     /** <code>buffered.records.per.partition</code> */
     public static final String BUFFERED_RECORDS_PER_PARTITION_CONFIG = "buffered.records.per.partition";
     private static final String BUFFERED_RECORDS_PER_PARTITION_DOC = "The maximum number of records to buffer per partition.";
@@ -69,6 +78,10 @@ public class StreamingConfig extends AbstractConfig {
     /** <code>timestamp.extractor</code> */
     public static final String TIMESTAMP_EXTRACTOR_CLASS_CONFIG = "timestamp.extractor";
     private static final String TIMESTAMP_EXTRACTOR_CLASS_DOC = "Timestamp extractor class that implements the <code>TimestampExtractor</code> interface.";
+
+    /** <code>partition.grouper</code> */
+    public static final String PARTITION_GROUPER_CLASS_CONFIG = "partition.grouper";
+    private static final String PARTITION_GROUPER_CLASS_DOC = "Partition grouper class that implements the <code>PartitionGrouper</code> interface.";
 
     /** <code>client.id</code> */
     public static final String CLIENT_ID_CONFIG = CommonClientConfigs.CLIENT_ID_CONFIG;
@@ -108,15 +121,15 @@ public class StreamingConfig extends AbstractConfig {
                                         Importance.MEDIUM,
                                         CommonClientConfigs.CLIENT_ID_DOC)
                                 .define(STATE_DIR_CONFIG,
-                                    Type.STRING,
-                                    SYSTEM_TEMP_DIRECTORY,
-                                    Importance.MEDIUM,
-                                    STATE_DIR_DOC)
+                                        Type.STRING,
+                                        SYSTEM_TEMP_DIRECTORY,
+                                        Importance.MEDIUM,
+                                        STATE_DIR_DOC)
                                 .define(COMMIT_INTERVAL_MS_CONFIG,
-                                    Type.LONG,
-                                    30000,
-                                    Importance.HIGH,
-                                    COMMIT_INTERVAL_MS_DOC)
+                                        Type.LONG,
+                                        30000,
+                                        Importance.HIGH,
+                                        COMMIT_INTERVAL_MS_DOC)
                                 .define(POLL_MS_CONFIG,
                                         Type.LONG,
                                         100,
@@ -127,6 +140,11 @@ public class StreamingConfig extends AbstractConfig {
                                         1,
                                         Importance.LOW,
                                         NUM_STREAM_THREADS_DOC)
+                                .define(NUM_STANDBY_REPLICAS_CONFIG,
+                                        Type.INT,
+                                        0,
+                                        Importance.LOW,
+                                        NUM_STANDBY_REPLICAS_DOC)
                                 .define(BUFFERED_RECORDS_PER_PARTITION_CONFIG,
                                         Type.INT,
                                         1000,
@@ -167,6 +185,11 @@ public class StreamingConfig extends AbstractConfig {
                                         Type.CLASS,
                                         Importance.HIGH,
                                         TIMESTAMP_EXTRACTOR_CLASS_DOC)
+                                .define(PARTITION_GROUPER_CLASS_CONFIG,
+                                        Type.CLASS,
+                                        DefaultPartitionGrouper.class,
+                                        Importance.HIGH,
+                                        PARTITION_GROUPER_CLASS_DOC)
                                 .define(BOOTSTRAP_SERVERS_CONFIG,
                                         Type.STRING,
                                         Importance.HIGH,
@@ -190,8 +213,20 @@ public class StreamingConfig extends AbstractConfig {
                                         CommonClientConfigs.METRICS_NUM_SAMPLES_DOC);
     }
 
+    public static class InternalConfig {
+        public static final String STREAM_THREAD_INSTANCE = "__stream.thread.instance__";
+    }
+
     public StreamingConfig(Map<?, ?> props) {
         super(CONFIG, props);
+    }
+
+    public Map<String, Object> getConsumerConfigs(StreamThread streamThread) {
+        Map<String, Object> props = getConsumerConfigs();
+        props.put(StreamingConfig.NUM_STANDBY_REPLICAS_CONFIG, getInt(StreamingConfig.NUM_STANDBY_REPLICAS_CONFIG));
+        props.put(StreamingConfig.InternalConfig.STREAM_THREAD_INSTANCE, streamThread);
+        props.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, KafkaStreamingPartitionAssignor.class.getName());
+        return props;
     }
 
     public Map<String, Object> getConsumerConfigs() {
@@ -199,7 +234,6 @@ public class StreamingConfig extends AbstractConfig {
 
         // set consumer default property values
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
-        props.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, "range");
 
         // remove properties that are not required for consumers
         props.remove(StreamingConfig.KEY_SERIALIZER_CLASS_CONFIG);
@@ -221,6 +255,22 @@ public class StreamingConfig extends AbstractConfig {
         props.remove(StreamingConfig.TIMESTAMP_EXTRACTOR_CLASS_CONFIG);
 
         return props;
+    }
+
+    public Serializer keySerializer() {
+        return getConfiguredInstance(StreamingConfig.KEY_SERIALIZER_CLASS_CONFIG, Serializer.class);
+    }
+
+    public Serializer valueSerializer() {
+        return getConfiguredInstance(StreamingConfig.VALUE_SERIALIZER_CLASS_CONFIG, Serializer.class);
+    }
+
+    public Deserializer keyDeserializer() {
+        return getConfiguredInstance(StreamingConfig.KEY_DESERIALIZER_CLASS_CONFIG, Deserializer.class);
+    }
+
+    public Deserializer valueDeserializer() {
+        return getConfiguredInstance(StreamingConfig.VALUE_DESERIALIZER_CLASS_CONFIG, Deserializer.class);
     }
 
     public static void main(String[] args) {

@@ -33,7 +33,7 @@ import kafka.server.KafkaConfig
 import kafka.utils._
 import org.apache.kafka.common.MetricName
 import org.apache.kafka.common.metrics._
-import org.apache.kafka.common.network.{Selector => KSelector, LoginType, Mode, ChannelBuilders, InvalidReceiveException}
+import org.apache.kafka.common.network.{Selector => KSelector, LoginType, Mode, ChannelBuilders}
 import org.apache.kafka.common.security.auth.KafkaPrincipal
 import org.apache.kafka.common.protocol.SecurityProtocol
 import org.apache.kafka.common.protocol.types.SchemaException
@@ -81,7 +81,6 @@ class SocketServer(val config: KafkaConfig, val metrics: Metrics, val time: Time
 
       connectionQuotas = new ConnectionQuotas(maxConnectionsPerIp, maxConnectionsPerIpOverrides)
 
-      val channelConfigs = config.channelConfigs
       val sendBufferSize = config.socketSendBufferBytes
       val recvBufferSize = config.socketReceiveBufferBytes
       val maxRequestSize = config.socketRequestMaxBytes
@@ -101,7 +100,7 @@ class SocketServer(val config: KafkaConfig, val metrics: Metrics, val time: Time
             connectionQuotas,
             connectionsMaxIdleMs,
             protocol,
-            channelConfigs,
+            config.values,
             metrics
           )
         }
@@ -357,7 +356,7 @@ private[kafka] class Processor(val id: Int,
                                connectionQuotas: ConnectionQuotas,
                                connectionsMaxIdleMs: Long,
                                protocol: SecurityProtocol,
-                               channelConfigs: java.util.Map[String, Object],
+                               channelConfigs: java.util.Map[String, _],
                                metrics: Metrics) extends AbstractServerThread(connectionQuotas) with KafkaMetricsGroup {
 
   private object ConnectionId {
@@ -418,9 +417,6 @@ private[kafka] class Processor(val id: Int,
             swallow(closeAll())
             shutdownComplete()
             throw e
-          case e: InvalidReceiveException =>
-            // Log warning and continue since Selector already closed the connection
-            warn("Connection was closed due to invalid receive. Processor will continue handling other connections")
         }
         selector.completedReceives.asScala.foreach { receive =>
           try {

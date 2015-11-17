@@ -84,7 +84,7 @@ class SimpleAclAuthorizer extends Authorizer with Logging {
     val kafkaConfig = KafkaConfig.fromProps(props)
 
     superUsers = configs.get(SimpleAclAuthorizer.SuperUsersProp).collect {
-      case str: String if str.nonEmpty => str.split(",").map(s => KafkaPrincipal.fromString(s.trim)).toSet
+      case str: String if str.nonEmpty => str.split(";").map(s => KafkaPrincipal.fromString(s.trim)).toSet
     }.getOrElse(Set.empty[KafkaPrincipal])
 
     shouldAllowEveryoneIfNoAclIsFound = configs.get(SimpleAclAuthorizer.AllowEveryoneIfNoAclIsFoundProp).map(_.toString.toBoolean).getOrElse(false)
@@ -96,7 +96,7 @@ class SimpleAclAuthorizer extends Authorizer with Logging {
     zkUtils = ZkUtils(zkUrl,
                       zkConnectionTimeoutMs,
                       zkSessionTimeOutMs,
-                      JaasUtils.isZkSecurityEnabled(System.getProperty(JaasUtils.JAVA_LOGIN_CONFIG_PARAM)))
+                      JaasUtils.isZkSecurityEnabled())
     zkUtils.makeSurePersistentPathExists(SimpleAclAuthorizer.AclZkPath)
 
     loadCache()

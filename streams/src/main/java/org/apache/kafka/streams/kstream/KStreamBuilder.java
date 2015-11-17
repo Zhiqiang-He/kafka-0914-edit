@@ -21,32 +21,37 @@ import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.streams.kstream.internals.KStreamImpl;
 import org.apache.kafka.streams.processor.TopologyBuilder;
 
+import java.util.Collections;
+import java.util.concurrent.atomic.AtomicInteger;
+
 /**
  * KStreamBuilder is the class to create KStream instances.
  */
 public class KStreamBuilder extends TopologyBuilder {
+
+    private final AtomicInteger index = new AtomicInteger(0);
 
     public KStreamBuilder() {
         super();
     }
 
     /**
-     * Creates a KStream instance for the specified topic. The stream is added to the default synchronization group.
+     * Creates a KStream instance for the specified topic.
      * The default deserializers specified in the config are used.
      *
      * @param topics          the topic names, if empty default to all the topics in the config
      * @return KStream
      */
     public <K, V> KStream<K, V> from(String... topics) {
-        String name = KStreamImpl.SOURCE_NAME + KStreamImpl.INDEX.getAndIncrement();
+        String name = newName(KStreamImpl.SOURCE_NAME);
 
         addSource(name, topics);
 
-        return new KStreamImpl<>(this, name);
+        return new KStreamImpl<>(this, name, Collections.singleton(name));
     }
 
     /**
-     * Creates a KStream instance for the specified topic. The stream is added to the default synchronization group.
+     * Creates a KStream instance for the specified topic.
      *
      * @param keyDeserializer key deserializer used to read this source KStream,
      *                        if not specified the default deserializer defined in the configs will be used
@@ -56,10 +61,14 @@ public class KStreamBuilder extends TopologyBuilder {
      * @return KStream
      */
     public <K, V> KStream<K, V> from(Deserializer<? extends K> keyDeserializer, Deserializer<? extends V> valDeserializer, String... topics) {
-        String name = KStreamImpl.SOURCE_NAME + KStreamImpl.INDEX.getAndIncrement();
+        String name = newName(KStreamImpl.SOURCE_NAME);
 
         addSource(name, keyDeserializer, valDeserializer, topics);
 
-        return new KStreamImpl<>(this, name);
+        return new KStreamImpl<>(this, name, Collections.singleton(name));
+    }
+
+    public String newName(String prefix) {
+        return prefix + String.format("%010d", index.getAndIncrement());
     }
 }

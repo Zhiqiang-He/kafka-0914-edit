@@ -36,6 +36,7 @@ import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.errors.RecordTooLargeException;
 import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.errors.TopicAuthorizationException;
 import org.apache.kafka.common.metrics.JmxReporter;
 import org.apache.kafka.common.metrics.MetricConfig;
 import org.apache.kafka.common.MetricName;
@@ -276,7 +277,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                     config.getLong(ProducerConfig.RECONNECT_BACKOFF_MS_CONFIG),
                     config.getInt(ProducerConfig.SEND_BUFFER_CONFIG),
                     config.getInt(ProducerConfig.RECEIVE_BUFFER_CONFIG),
-                    this.requestTimeoutMs);
+                    this.requestTimeoutMs, time);
             this.sender = new Sender(client,
                     this.metadata,
                     this.accumulator,
@@ -473,21 +474,22 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
         if (!this.metadata.containsTopic(topic))
             this.metadata.add(topic);
 
-        if (metadata.fetch().partitionsForTopic(topic) != null) {
+        if (metadata.fetch().partitionsForTopic(topic) != null)
             return;
-        } else {
-            long begin = time.milliseconds();
-            long remainingWaitMs = maxWaitMs;
-            while (metadata.fetch().partitionsForTopic(topic) == null) {
-                log.trace("Requesting metadata update for topic {}.", topic);
-                int version = metadata.requestUpdate();
-                sender.wakeup();
-                metadata.awaitUpdate(version, remainingWaitMs);
-                long elapsed = time.milliseconds() - begin;
-                if (elapsed >= maxWaitMs)
-                    throw new TimeoutException("Failed to update metadata after " + maxWaitMs + " ms.");
-                remainingWaitMs = maxWaitMs - elapsed;
-            }
+
+        long begin = time.milliseconds();
+        long remainingWaitMs = maxWaitMs;
+        while (metadata.fetch().partitionsForTopic(topic) == null) {
+            log.trace("Requesting metadata update for topic {}.", topic);
+            int version = metadata.requestUpdate();
+            sender.wakeup();
+            metadata.awaitUpdate(version, remainingWaitMs);
+            long elapsed = time.milliseconds() - begin;
+            if (elapsed >= maxWaitMs)
+                throw new TimeoutException("Failed to update metadata after " + maxWaitMs + " ms.");
+            if (metadata.fetch().unauthorizedTopics().contains(topic))
+                throw new TopicAuthorizationException(topic);
+            remainingWaitMs = maxWaitMs - elapsed;
         }
     }
 

@@ -23,16 +23,15 @@ import kafka.common.{Topic, AdminCommandFailedException}
 import kafka.utils.CommandLineUtils
 import kafka.utils._
 import kafka.utils.ZkUtils._
-import org.I0Itec.zkclient.ZkClient
 import org.I0Itec.zkclient.exception.ZkNodeExistsException
 import scala.collection._
 import scala.collection.JavaConversions._
 import kafka.log.{Defaults, LogConfig}
 import kafka.consumer.{ConsumerConfig, Whitelist}
-import kafka.server.{ConfigType, OffsetManager}
+import kafka.server.ConfigType
 import org.apache.kafka.common.utils.Utils
 import org.apache.kafka.common.security.JaasUtils
-import kafka.coordinator.ConsumerCoordinator
+import kafka.coordinator.GroupCoordinator
 
 
 object TopicCommand extends Logging {
@@ -54,7 +53,7 @@ object TopicCommand extends Logging {
     val zkUtils = ZkUtils(opts.options.valueOf(opts.zkConnectOpt), 
                           30000,
                           30000,
-                          JaasUtils.isZkSecurityEnabled(System.getProperty(JaasUtils.JAVA_LOGIN_CONFIG_PARAM)))
+                          JaasUtils.isZkSecurityEnabled())
     var exitCode = 0
     try {
       if(opts.options.has(opts.createOpt))
@@ -130,7 +129,7 @@ object TopicCommand extends Logging {
       }
 
       if(opts.options.has(opts.partitionsOpt)) {
-        if (topic == ConsumerCoordinator.OffsetsTopicName) {
+        if (topic == GroupCoordinator.GroupMetadataTopicName) {
           throw new IllegalArgumentException("The number of partitions for the offsets topic cannot be changed.")
         }
         println("WARNING: If partitions are increased for a topic that has a key, the partition " +

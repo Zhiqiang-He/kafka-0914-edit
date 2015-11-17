@@ -28,7 +28,9 @@ import charset.Charset
 
 import kafka.security.auth.{Resource, Authorizer, Acl}
 import org.apache.kafka.common.protocol.SecurityProtocol
+import org.apache.kafka.common.security.ssl.SslFactory
 import org.apache.kafka.common.utils.Utils._
+import org.apache.kafka.test.TestSslUtils
 
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 
@@ -49,13 +51,9 @@ import kafka.utils.ZkUtils._
 
 import org.junit.Assert._
 import org.apache.kafka.clients.producer.KafkaProducer
-import org.apache.kafka.clients.consumer.{ConsumerRebalanceListener, KafkaConsumer}
-import org.apache.kafka.common.serialization.ByteArrayDeserializer
+import org.apache.kafka.clients.consumer.{RangeAssignor, KafkaConsumer}
 import org.apache.kafka.clients.CommonClientConfigs
 import org.apache.kafka.common.network.Mode
-import org.apache.kafka.common.security.ssl.SSLFactory
-import org.apache.kafka.common.config.SSLConfigs
-import org.apache.kafka.test.TestSSLUtils
 
 import scala.collection.Map
 import scala.collection.JavaConversions._
@@ -429,6 +427,20 @@ object TestUtils extends Logging {
     new Producer[K, V](new ProducerConfig(props))
   }
 
+  private def securityConfigs(mode: Mode,
+                              securityProtocol: SecurityProtocol,
+                              trustStoreFile: Option[File],
+                              certAlias: String): Properties = {
+    val props = new Properties
+    if (usesSslTransportLayer(securityProtocol))
+      props.putAll(sslConfigs(mode, false, trustStoreFile, certAlias))
+    props.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, securityProtocol.name)
+    props
+  }
+
+  def producerSecurityConfigs(securityProtocol: SecurityProtocol, trustStoreFile: Option[File]): Properties =
+    securityConfigs(Mode.CLIENT, securityProtocol, trustStoreFile, "producer")
+
   /**
    * Create a (new) producer with a few pre-configured properties.
    */
@@ -441,7 +453,7 @@ object TestUtils extends Logging {
                         lingerMs: Long = 0,
                         securityProtocol: SecurityProtocol = SecurityProtocol.PLAINTEXT,
                         trustStoreFile: Option[File] = None,
-                        props: Option[Properties] = None) : KafkaProducer[Array[Byte],Array[Byte]] = {
+                        props: Option[Properties] = None): KafkaProducer[Array[Byte], Array[Byte]] = {
     import org.apache.kafka.clients.producer.ProducerConfig
 
     val producerProps = props.getOrElse(new Properties)
@@ -463,9 +475,8 @@ object TestUtils extends Logging {
       if (!producerProps.containsKey(key)) producerProps.put(key, value)
     }
 
-    if (usesSslTransportLayer(securityProtocol))
-      producerProps.putAll(sslConfigs(Mode.CLIENT, false, trustStoreFile, "producer"))
-    producerProps.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, securityProtocol.name)
+    producerProps.putAll(producerSecurityConfigs(securityProtocol, trustStoreFile))
+
     new KafkaProducer[Array[Byte],Array[Byte]](producerProps)
   }
 
@@ -474,6 +485,9 @@ object TestUtils extends Logging {
     case _ => false
   }
 
+  def consumerSecurityConfigs(securityProtocol: SecurityProtocol, trustStoreFile: Option[File]): Properties =
+    securityConfigs(Mode.CLIENT, securityProtocol, trustStoreFile, "consumer")
+
   /**
    * Create a new consumer with a few pre-configured properties.
    */
@@ -481,7 +495,7 @@ object TestUtils extends Logging {
                         groupId: String,
                         autoOffsetReset: String = "earliest",
                         partitionFetchSize: Long = 4096L,
-                        partitionAssignmentStrategy: String = "blah",
+                        partitionAssignmentStrategy: String = classOf[RangeAssignor].getName,
                         sessionTimeout: Int = 30000,
                         securityProtocol: SecurityProtocol,
                         trustStoreFile: Option[File] = None) : KafkaConsumer[Array[Byte],Array[Byte]] = {
@@ -492,15 +506,16 @@ object TestUtils extends Logging {
     consumerProps.put(ConsumerConfig.GROUP_ID_CONFIG, groupId)
     consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset)
     consumerProps.put(ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG, partitionFetchSize.toString)
+
     consumerProps.put(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, "100")
     consumerProps.put(ConsumerConfig.RECONNECT_BACKOFF_MS_CONFIG, "200")
     consumerProps.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArrayDeserializer")
     consumerProps.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArrayDeserializer")
     consumerProps.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, partitionAssignmentStrategy)
     consumerProps.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, sessionTimeout.toString)
-    if (usesSslTransportLayer(securityProtocol))
-      consumerProps.putAll(sslConfigs(Mode.CLIENT, false, trustStoreFile, "consumer"))
-    consumerProps.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, securityProtocol.name)
+
+    consumerProps.putAll(consumerSecurityConfigs(securityProtocol, trustStoreFile))
+
     new KafkaConsumer[Array[Byte],Array[Byte]](consumerProps)
   }
 
@@ -966,9 +981,9 @@ object TestUtils extends Logging {
 
     val sslConfigs = {
       if (mode == Mode.SERVER)
-        TestSSLUtils.createSSLConfig(true, true, mode, trustStore, certAlias)
+        TestSslUtils.createSslConfig(true, true, mode, trustStore, certAlias)
       else
-        TestSSLUtils.createSSLConfig(clientCert, false, mode, trustStore, certAlias)
+        TestSslUtils.createSslConfig(clientCert, false, mode, trustStore, certAlias)
     }
 
     val sslProps = new Properties()

@@ -30,16 +30,17 @@ import org.apache.kafka.clients.{ManualMetadataUpdater, NetworkClient, ClientReq
 import org.apache.kafka.common.network.{LoginType, Selectable, ChannelBuilders, NetworkReceive, Selector, Mode}
 import org.apache.kafka.common.requests.{ListOffsetResponse, FetchResponse, RequestSend, AbstractRequest, ListOffsetRequest}
 import org.apache.kafka.common.requests.{FetchRequest => JFetchRequest}
+import org.apache.kafka.common.security.ssl.SslFactory
 import org.apache.kafka.common.{Node, TopicPartition}
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.protocol.{Errors, ApiKeys}
-import org.apache.kafka.common.security.ssl.SSLFactory
 import org.apache.kafka.common.utils.Time
 
 import scala.collection.{JavaConverters, Map, mutable}
 import JavaConverters._
 
 class ReplicaFetcherThread(name: String,
+                           fetcherId: Int,
                            sourceBroker: BrokerEndPoint,
                            brokerConfig: KafkaConfig,
                            replicaMgr: ReplicaManager,
@@ -65,6 +66,9 @@ class ReplicaFetcherThread(name: String,
 
   private val sourceNode = new Node(sourceBroker.id, sourceBroker.host, sourceBroker.port)
 
+  // we need to include both the broker id and the fetcher id
+  // as the metrics tag to avoid metric name conflicts with
+  // more than one fetcher thread to the same broker
   private val networkClient = {
     val selector = new Selector(
       NetworkReceive.UNLIMITED,
@@ -72,9 +76,9 @@ class ReplicaFetcherThread(name: String,
       metrics,
       time,
       "replica-fetcher",
-      Map("broker-id" -> sourceBroker.id.toString).asJava,
+      Map("broker-id" -> sourceBroker.id.toString, "fetcher-id" -> fetcherId.toString).asJava,
       false,
-      ChannelBuilders.create(brokerConfig.interBrokerSecurityProtocol, Mode.CLIENT, LoginType.SERVER, brokerConfig.channelConfigs)
+      ChannelBuilders.create(brokerConfig.interBrokerSecurityProtocol, Mode.CLIENT, LoginType.SERVER, brokerConfig.values)
     )
     new NetworkClient(
       selector,
@@ -84,7 +88,8 @@ class ReplicaFetcherThread(name: String,
       0,
       Selectable.USE_DEFAULT_BUFFER_SIZE,
       brokerConfig.replicaSocketReceiveBufferBytes,
-      brokerConfig.requestTimeoutMs
+      brokerConfig.requestTimeoutMs,
+      time
     )
   }
 
@@ -162,9 +167,9 @@ class ReplicaFetcherThread(name: String,
         Runtime.getRuntime.halt(1)
       }
 
-      replicaMgr.logManager.truncateTo(Map(topicAndPartition -> leaderEndOffset))
       warn("Replica %d for partition %s reset its fetch offset from %d to current leader %d's latest offset %d"
         .format(brokerConfig.brokerId, topicAndPartition, replica.logEndOffset.messageOffset, sourceBroker.id, leaderEndOffset))
+      replicaMgr.logManager.truncateTo(Map(topicAndPartition -> leaderEndOffset))
       leaderEndOffset
     } else {
       /**

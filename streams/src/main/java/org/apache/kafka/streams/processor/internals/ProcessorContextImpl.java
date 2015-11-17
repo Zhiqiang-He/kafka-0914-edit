@@ -18,7 +18,6 @@
 package org.apache.kafka.streams.processor.internals;
 
 import org.apache.kafka.common.KafkaException;
-import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.streams.StreamingConfig;
@@ -26,22 +25,18 @@ import org.apache.kafka.streams.StreamingMetrics;
 import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.StateRestoreCallback;
+import org.apache.kafka.streams.processor.TaskId;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 public class ProcessorContextImpl implements ProcessorContext, RecordCollector.Supplier {
 
     private static final Logger log = LoggerFactory.getLogger(ProcessorContextImpl.class);
 
-    private final int id;
+    private final TaskId id;
     private final StreamTask task;
     private final StreamingMetrics metrics;
     private final RecordCollector collector;
@@ -55,7 +50,7 @@ public class ProcessorContextImpl implements ProcessorContext, RecordCollector.S
     private boolean initialized;
 
     @SuppressWarnings("unchecked")
-    public ProcessorContextImpl(int id,
+    public ProcessorContextImpl(TaskId id,
                                 StreamTask task,
                                 StreamingConfig config,
                                 RecordCollector collector,
@@ -67,55 +62,29 @@ public class ProcessorContextImpl implements ProcessorContext, RecordCollector.S
         this.collector = collector;
         this.stateMgr = stateMgr;
 
-        this.keySerializer = config.getConfiguredInstance(StreamingConfig.KEY_SERIALIZER_CLASS_CONFIG, Serializer.class);
-        this.valSerializer = config.getConfiguredInstance(StreamingConfig.VALUE_SERIALIZER_CLASS_CONFIG, Serializer.class);
-        this.keyDeserializer = config.getConfiguredInstance(StreamingConfig.KEY_DESERIALIZER_CLASS_CONFIG, Deserializer.class);
-        this.valDeserializer = config.getConfiguredInstance(StreamingConfig.VALUE_DESERIALIZER_CLASS_CONFIG, Deserializer.class);
+        this.keySerializer = config.keySerializer();
+        this.valSerializer = config.valueSerializer();
+        this.keyDeserializer = config.keyDeserializer();
+        this.valDeserializer = config.valueDeserializer();
 
         this.initialized = false;
-    }
-
-    @Override
-    public RecordCollector recordCollector() {
-        return this.collector;
     }
 
     public void initialized() {
         this.initialized = true;
     }
 
-    @Override
-    public boolean joinable() {
-        Set<TopicPartition> partitions = this.task.partitions();
-        Map<Integer, List<String>> partitionsById = new HashMap<>();
-        int firstId = -1;
-        for (TopicPartition partition : partitions) {
-            if (!partitionsById.containsKey(partition.partition())) {
-                partitionsById.put(partition.partition(), new ArrayList<String>());
-            }
-            partitionsById.get(partition.partition()).add(partition.topic());
+    public TaskId id() {
+        return id;
+    }
 
-            if (firstId < 0)
-                firstId = partition.partition();
-        }
-
-        List<String> topics = partitionsById.get(firstId);
-        for (List<String> topicsPerPartition : partitionsById.values()) {
-            if (topics.size() != topicsPerPartition.size())
-                return false;
-
-            for (String topic : topicsPerPartition) {
-                if (!topics.contains(topic))
-                    return false;
-            }
-        }
-
-        return true;
+    public ProcessorStateManager getStateMgr() {
+        return stateMgr;
     }
 
     @Override
-    public int id() {
-        return id;
+    public RecordCollector recordCollector() {
+        return this.collector;
     }
 
     @Override
@@ -158,6 +127,14 @@ public class ProcessorContextImpl implements ProcessorContext, RecordCollector.S
 
     @Override
     public StateStore getStateStore(String name) {
+        ProcessorNode node = task.node();
+
+        if (node == null)
+            throw new KafkaException("accessing from an unknown node");
+
+        if (!node.stateStores.contains(name))
+            throw new KafkaException("Processor " + node.name() + " has no access to StateStore " + name);
+
         return stateMgr.getStore(name);
     }
 
